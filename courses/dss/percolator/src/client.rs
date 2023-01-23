@@ -1,18 +1,18 @@
 use core::time;
-use std::sync::Arc;
-use std::thread::sleep;
-use std::time::Duration;
 use futures::executor::block_on;
 use futures::future::ok;
 use futures::lock::Mutex;
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::thread::sleep;
+use std::time::Duration;
 
-use labrpc::*;
 use labrpc::Error;
+use labrpc::*;
 
-use crate::service::{TSOClient, TransactionClient, timestamp};
-use crate::msg::{TimestampRequest, TimestampResponse, GetRequest, GetResponse};
-use crate::msg::{PrewriteRequest, PrewriteResponse, CommitRequest, CommitResponse};
+use crate::msg::{CommitRequest, CommitResponse, PrewriteRequest, PrewriteResponse};
+use crate::msg::{GetRequest, GetResponse, TimestampRequest, TimestampResponse};
+use crate::service::{timestamp, TSOClient, TransactionClient};
 
 // BACKOFF_TIME_MS is the wait time before retrying to send the request.
 // It should be exponential growth. e.g.
@@ -34,7 +34,7 @@ pub struct Client {
     tso_client: TSOClient,
     txn_client: TransactionClient,
     deltas: HashMap<Vec<u8>, Vec<u8>>,
-    start_ts: u64
+    start_ts: u64,
 }
 
 impl Client {
@@ -42,10 +42,10 @@ impl Client {
     pub fn new(tso_client: TSOClient, txn_client: TransactionClient) -> Client {
         // Your code here.
         Client {
-            tso_client: tso_client, 
-            txn_client: txn_client, 
-            deltas: HashMap::new(), 
-            start_ts: 0
+            tso_client: tso_client,
+            txn_client: txn_client,
+            deltas: HashMap::new(),
+            start_ts: 0,
         }
     }
 
@@ -54,9 +54,7 @@ impl Client {
         // Your code here.
         let mut back_off_time = BACKOFF_TIME_MS;
         for retry in (0..RETRY_TIMES) {
-            let res = block_on(
-                self.tso_client.get_timestamp(&TimestampRequest {})
-            );
+            let res = block_on(self.tso_client.get_timestamp(&TimestampRequest {}));
             if let Ok(t) = res {
                 return Ok(t.ts);
             }
@@ -71,6 +69,7 @@ impl Client {
         // Your code here.
         if let Ok(timestamp) = self.get_timestamp() {
             self.start_ts = timestamp;
+            println!("begining a txn at {}", timestamp);
         } else {
             panic!("Cannot get start_ts.");
         }
@@ -81,19 +80,15 @@ impl Client {
         // Your code here.
         let get_request = GetRequest {
             ts: self.start_ts,
-            key: key
+            key: key,
         };
 
         for retry in (0..RETRY_TIMES) {
-            let res = block_on(
-                self.txn_client.get(&get_request)
-            );
+            let res = block_on(self.txn_client.get(&get_request));
             if let Ok(resp) = res {
                 return Ok(resp.value);
             }
-            sleep(Duration::from_millis(
-               (1 << retry) * BACKOFF_TIME_MS
-            ));
+            sleep(Duration::from_millis((1 << retry) * BACKOFF_TIME_MS));
         }
         Err(Error::Timeout)
     }
@@ -119,13 +114,16 @@ impl Client {
         let req = CommitRequest {
             is_primary: is_primary,
             start_ts: self.start_ts,
-            commit_ts: commit_ts, 
-            key: key.clone()
+            commit_ts: commit_ts,
+            key: key.clone(),
         };
 
         for retry in (0..RETRY_TIMES) {
-            if let Ok(resp) = block_on(self.txn_client.commit(&req)) {
+            let res = block_on(self.txn_client.commit(&req));
+            if let Ok(resp) = res {
                 return Ok(resp.okay);
+            } else if let Err(err) = res {
+                return Err(err);
             }
 
             sleep(Duration::from_millis(BACKOFF_TIME_MS * (1 << retry)));
@@ -144,33 +142,44 @@ impl Client {
         let mut delta_iter = self.deltas.iter();
         let primary = delta_iter.next().unwrap();
         let secondaries = delta_iter.collect::<Vec<_>>();
-        
+
         // 2PC: first phase
         let mut delta_iter = self.deltas.iter();
         while let Some((key, value)) = delta_iter.next() {
-            let pw_args = PrewriteRequest{
+            let pw_args = PrewriteRequest {
                 start_ts: self.start_ts,
                 key: key.clone(),
                 value: value.clone(),
                 primary_key: primary.0.clone(),
             };
-            let okay = self.prewrite(pw_args)?;
-            if !okay {
+            if let Ok(okay) = self.prewrite(pw_args) {
+                if !okay {
+                    return Ok(false);
+                }
+            } else {
                 return Ok(false);
             }
         }
 
         let commit_ts = self.get_timestamp()?;
-        
+
         // 2PC: second phase
-        let commit_primary = self.inner_commit(true, commit_ts, primary.0)?;
-        if !commit_primary {
+        let commit_primary = self.inner_commit(true, commit_ts, primary.0);
+        if let Err(labrpc::Error::Other(msg)) = commit_primary {
+            if msg == "reqhook" {
+                return Ok(false);
+            } else if msg == "resphook" {
+                return Err(labrpc::Error::Other("resphook".to_owned()));
+            }
+        } 
+        else if let Ok(false) = commit_primary {
             return Ok(false);
         }
         for (key, _) in secondaries {
             self.inner_commit(false, commit_ts, key);
         }
 
+        println!("Committed a txn at {}", commit_ts);
         Ok(true)
     }
 }
