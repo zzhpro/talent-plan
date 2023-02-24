@@ -265,23 +265,20 @@ impl MemoryStorage {
                 Some(primary_ts), Some(primary_ts)) {
                 println!("Backward: lock at {:?} {}", primary_key.clone(), primary_ts);
                 kv_table.erase(primary_key.clone(), Column::Lock, primary_ts);
-                kv_table.erase(key, Column::Lock, primary_ts);
             } else {
                 println!("Forward {:?} {:?}", key, primary_key);
                 // Primary lock is gone, we must roll forward
-                if let Some(((_, commit_ts), Value::Timestamp(data_ts))) = kv_table.read_first(primary_key, Column::Write, Some(primary_ts), None) {
-                    let cts = *commit_ts;
-                    let dts = *data_ts;
+                if let Some(((_, commit_ts), _)) = kv_table.read_first(primary_key, Column::Write, Some(primary_ts), None) {
+                    let commit_ts_copy = *commit_ts;
                     kv_table.write(
                         key.clone(),
                         Column::Write,
-                        cts,
-                        Value::Timestamp(dts),
+                        commit_ts_copy,
+                        Value::Timestamp(primary_ts),
                     );
-                    kv_table.erase(key.clone(), Column::Lock, primary_ts);   
                 }
-                kv_table.erase(key, Column::Lock, primary_ts);
             }
+            kv_table.erase(key, Column::Lock, primary_ts);
         }
     }
 }
