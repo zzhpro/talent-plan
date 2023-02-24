@@ -278,10 +278,9 @@ impl MemoryStorage {
                         cts,
                         Value::Timestamp(dts),
                     );
-                    kv_table.erase(key, Column::Lock, primary_ts);   
-                } else {
-                    kv_table.erase(key, Column::Lock, primary_ts);
+                    kv_table.erase(key.clone(), Column::Lock, primary_ts);   
                 }
+                kv_table.erase(key, Column::Lock, primary_ts);
             }
         }
     }
